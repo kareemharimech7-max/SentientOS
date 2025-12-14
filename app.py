@@ -3,7 +3,6 @@ from supabase import create_client, Client, ClientOptions
 from groq import Groq
 from dotenv import load_dotenv
 import os
-import json
 import time
 from pypdf import PdfReader
 
@@ -12,52 +11,62 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
-PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
 
 # ==========================================
-# 💾 SMART STORAGE (Fixes Loop + Security)
+# 🎨 UI STYLING
 # ==========================================
-class TempFileStorage:
-    def __init__(self, filename="supabase.auth.token"):
-        self.filename = filename
-
-    def set_item(self, key, value):
-        # We write to a file so the Verifier survives the Reload
-        try:
-            with open(self.filename, 'w') as f: f.write(value)
-        except: pass
-
-    def get_item(self, key):
-        if not os.path.exists(self.filename): return None
-        try:
-            with open(self.filename, 'r') as f: return f.read()
-        except: return None
-
-    def remove_item(self, key):
-        if os.path.exists(self.filename):
-            try: os.remove(self.filename)
-            except: pass
+st.markdown("""
+<style>
+    .stApp { background-color: #02040a; color: #e0e0e0; }
+    .feature-box {
+        background: #0a0a0f; border: 1px solid #1f1f2e; padding: 20px;
+        border-radius: 12px; text-align: center; height: 100%;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .feature-icon { font-size: 30px; margin-bottom: 10px; display: block; }
+    .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; }
+    .feature-desc { color: #888; font-size: 14px; }
+    div.stButton > button {
+        background-color: #0f1016; color: #00d4ff; border: 1px solid #00d4ff;
+        width: 100%; border-radius: 6px; font-weight: bold; transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        background-color: #00d4ff; color: #000; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
+    }
+    .stSidebar { background-color: #050508; border-right: 1px solid #111; }
+    .upgrade-box { 
+        border: 1px solid #a855f7; 
+        background: linear-gradient(135deg, #2e1065 0%, #000 100%); 
+        padding: 15px; border-radius: 8px; margin-bottom: 20px; 
+    }
+    section[data-testid="stFileUploader"] {
+        background-color: #0a0a0f; border: 1px dashed #333; border-radius: 8px; padding: 10px;
+    }
+    /* Login Inputs */
+    .stTextInput > div > div > input {
+        background-color: #0a0a0f; color: white; border: 1px solid #333;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # 🔑 INIT CLIENTS
 # ==========================================
-# 1. Initialize Supabase (NO CACHING - Unique per user)
+# Standard initialization (No special storage needed for OTP)
 def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    # We use TempStorage to handle the OAuth Redirect data
-    return create_client(url, key, options=ClientOptions(storage=TempFileStorage()))
+    return create_client(url, key)
 
 if "supabase_client" not in st.session_state:
     st.session_state.supabase_client = init_supabase()
 
 supabase = st.session_state.supabase_client
 
-# 2. Groq (Cached is fine)
 @st.cache_resource
 def init_groq():
     key = os.getenv("GROQ_API_KEY")
@@ -70,39 +79,6 @@ PAYPAL_EMAIL = os.getenv("PAYPAL_EMAIL")
 if not supabase:
     st.error("❌ Critical: Missing Supabase Keys")
     st.stop()
-
-# ==========================================
-# 🔄 AUTH FLOW (THE LOGIC FIX)
-# ==========================================
-
-# 1. Handle the Return from GitHub
-if "code" in st.query_params:
-    try:
-        # Exchange code for session using the Verifier in TempStorage
-        res = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
-        
-        # SAVE SESSION TO BROWSER MEMORY
-        st.session_state.user_session = res.session
-        
-        # SECURITY: Delete the temp file so others don't see it
-        if os.path.exists("supabase.auth.token"):
-            os.remove("supabase.auth.token")
-            
-        st.query_params.clear()
-        st.rerun()
-    except Exception as e:
-        # Ignore PKCE errors on refresh
-        st.query_params.clear()
-
-# 2. If we have a session in memory, force the client to use it
-if "user_session" in st.session_state:
-    try:
-        supabase.auth.set_session(
-            st.session_state.user_session.access_token,
-            st.session_state.user_session.refresh_token
-        )
-    except:
-        del st.session_state.user_session
 
 # ==========================================
 # ☁️ DATABASE FUNCTIONS
@@ -163,48 +139,15 @@ def process_uploaded_file(uploaded_file):
         return f"Error reading file: {e}"
 
 # ==========================================
-# 🎨 UI STYLING
-# ==========================================
-st.markdown("""
-<style>
-    .stApp { background-color: #02040a; color: #e0e0e0; }
-    .feature-box {
-        background: #0a0a0f; border: 1px solid #1f1f2e; padding: 20px;
-        border-radius: 12px; text-align: center; height: 100%;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-    }
-    .feature-icon { font-size: 30px; margin-bottom: 10px; display: block; }
-    .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; }
-    .feature-desc { color: #888; font-size: 14px; }
-    div.stButton > button {
-        background-color: #0f1016; color: #00d4ff; border: 1px solid #00d4ff;
-        width: 100%; border-radius: 6px; font-weight: bold; transition: all 0.3s ease;
-    }
-    div.stButton > button:hover {
-        background-color: #00d4ff; color: #000; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
-    }
-    .stSidebar { background-color: #050508; border-right: 1px solid #111; }
-    .upgrade-box { 
-        border: 1px solid #a855f7; 
-        background: linear-gradient(135deg, #2e1065 0%, #000 100%); 
-        padding: 15px; border-radius: 8px; margin-bottom: 20px; 
-    }
-    section[data-testid="stFileUploader"] {
-        background-color: #0a0a0f; border: 1px dashed #333; border-radius: 8px; padding: 10px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ==========================================
 # 🚀 APP LOGIC
 # ==========================================
 
-# CHECK SESSION
-try: session = supabase.auth.get_session()
-except: session = None
+# Check Session State
+if "user_session" not in st.session_state:
+    st.session_state.user_session = None
 
-# --- LANDING PAGE ---
-if not session:
+# --- LANDING PAGE (LOGGED OUT) ---
+if not st.session_state.user_session:
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
         if os.path.exists(LOGO_FILE): st.image(LOGO_FILE, use_container_width=True)
@@ -217,23 +160,56 @@ if not session:
     with c3: st.markdown("<div class='feature-box'><span class='feature-icon'>☁️</span><div class='feature-title'>HIVE MEMORY</div><div class='feature-desc'>Cloud synchronization.</div></div>", unsafe_allow_html=True)
 
     st.markdown("<br><br>", unsafe_allow_html=True)
+    
+    # --- LOGIN FORM (OTP) ---
     _, center_col, _ = st.columns([1, 1.5, 1])
     with center_col:
         st.markdown("<h3 style='text-align: center'>INITIALIZE LINK</h3>", unsafe_allow_html=True)
-        tab_login, tab_reg = st.tabs(["LOGIN", "REGISTER"])
-        with tab_login:
-            try:
-                # Use Live URL
-                res = supabase.auth.sign_in_with_oauth({ "provider": "github", "options": { "redirectTo": PRODUCTION_URL } })
-                st.link_button("▶ ACCESS TERMINAL", res.url, type="primary", use_container_width=True)
-            except: st.error("Link Failure")
-        with tab_reg:
-            try: st.link_button("▶ CREATE IDENTITY", res.url, type="secondary", use_container_width=True)
-            except: pass
+        
+        if "otp_sent" not in st.session_state:
+            st.session_state.otp_sent = False
 
-# --- APP INTERFACE ---
+        # STEP 1: ENTER EMAIL
+        if not st.session_state.otp_sent:
+            email_input = st.text_input("Enter Email Address", placeholder="operator@sentient.os")
+            if st.button("SEND ACCESS CODE", type="primary"):
+                if email_input:
+                    try:
+                        supabase.auth.sign_in_with_otp({"email": email_input})
+                        st.session_state.otp_email = email_input
+                        st.session_state.otp_sent = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                else:
+                    st.warning("Please enter an email.")
+        
+        # STEP 2: ENTER CODE
+        else:
+            st.info(f"Code sent to {st.session_state.otp_email}")
+            otp_input = st.text_input("Enter 6-Digit Code", placeholder="123456")
+            
+            c_back, c_verify = st.columns(2)
+            with c_back:
+                if st.button("Back"):
+                    st.session_state.otp_sent = False
+                    st.rerun()
+            with c_verify:
+                if st.button("VERIFY & LOGIN", type="primary"):
+                    try:
+                        res = supabase.auth.verify_otp({
+                            "email": st.session_state.otp_email,
+                            "token": otp_input,
+                            "type": "email"
+                        })
+                        st.session_state.user_session = res.session
+                        st.rerun()
+                    except Exception as e:
+                        st.error("Invalid Code.")
+
+# --- APP INTERFACE (LOGGED IN) ---
 else:
-    user = session.user
+    user = st.session_state.user_session.user
     email = user.email
     sync_user(email)
     user_premium = is_premium(email)
@@ -273,7 +249,8 @@ else:
             st.link_button("PURCHASE LICENSE ($10)", f"https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business={PAYPAL_EMAIL}&item_name=SentientPro&amount=10.00", use_container_width=True)
         if st.button("TERMINATE LINK"):
             supabase.auth.sign_out()
-            if "user_session" in st.session_state: del st.session_state.user_session
+            st.session_state.user_session = None
+            st.session_state.otp_sent = False
             st.rerun()
 
     # CHAT ID LOGIC
@@ -348,7 +325,7 @@ else:
     if ac3.button("🏗️ ARCHITECTURE"): auto_prompt = "Propose a scalable system architecture for this concept."
     if ac4.button("📝 GENERATE DOCS"): auto_prompt = "Generate professional documentation (README.md) for this."
 
-    # INPUT (OPTIMISTIC UI)
+    # INPUT
     user_input = st.chat_input("Enter command...")
     final_prompt = auto_prompt if auto_prompt else user_input
 
@@ -377,4 +354,3 @@ else:
                 time.sleep(0.1) 
                 st.rerun()
             except Exception as e: st.error(f"Error: {e}")
-
