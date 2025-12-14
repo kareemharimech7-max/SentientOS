@@ -12,18 +12,18 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
+# 👇 ENSURE THIS MATCHES YOUR LIVE URL EXACTLY
+PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
 
 # ==========================================
-# 🎨 UI STYLING (Cyberpunk / Neon)
+# 🎨 UI STYLING
 # ==========================================
 st.markdown("""
 <style>
     .stApp { background-color: #02040a; color: #e0e0e0; }
-    
-    /* FEATURE CARDS */
     .feature-box {
         background: #0a0a0f; border: 1px solid #1f1f2e; padding: 20px;
         border-radius: 12px; text-align: center; height: 100%;
@@ -32,8 +32,6 @@ st.markdown("""
     .feature-icon { font-size: 30px; margin-bottom: 10px; display: block; }
     .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; }
     .feature-desc { color: #888; font-size: 14px; }
-
-    /* BUTTONS */
     div.stButton > button {
         background-color: #0f1016; color: #00d4ff; border: 1px solid #00d4ff;
         width: 100%; border-radius: 6px; font-weight: bold; transition: all 0.3s ease;
@@ -41,18 +39,12 @@ st.markdown("""
     div.stButton > button:hover {
         background-color: #00d4ff; color: #000; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
     }
-    
-    /* SIDEBAR */
     .stSidebar { background-color: #050508; border-right: 1px solid #111; }
-    
-    /* PRO BOX */
     .upgrade-box { 
         border: 1px solid #a855f7; 
         background: linear-gradient(135deg, #2e1065 0%, #000 100%); 
         padding: 15px; border-radius: 8px; margin-bottom: 20px; 
     }
-
-    /* FILE UPLOADER */
     section[data-testid="stFileUploader"] {
         background-color: #0a0a0f; border: 1px dashed #333; border-radius: 8px; padding: 10px;
     }
@@ -60,51 +52,31 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 💾 ROBUST AUTH STORAGE
+# 🔑 INIT CLIENTS (SECURE FIX)
 # ==========================================
-class LocalFileStorage:
-    def __init__(self, filename="supabase_auth.json"): self.filename = filename
-    def set_item(self, key, value):
-        try:
-            data = {}
-            if os.path.exists(self.filename):
-                with open(self.filename, 'r') as f:
-                    c = f.read()
-                    if c: data = json.loads(c)
-            data[key] = value
-            with open(self.filename, 'w') as f: json.dump(data, f)
-        except: pass
-    def get_item(self, key):
-        if not os.path.exists(self.filename): return None
-        try:
-            with open(self.filename, 'r') as f: return json.load(f).get(key)
-        except: return None
-    def remove_item(self, key):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f: data = json.load(f)
-                if key in data:
-                    del data[key]
-                    with open(self.filename, 'w') as f: json.dump(data, f)
-            except: pass
 
-# ==========================================
-# 🔑 INIT CLIENTS (Cached)
-# ==========================================
-@st.cache_resource
+# 1. REMOVE @st.cache_resource FROM SUPABASE
+# Every user needs their OWN instance, otherwise they share your login!
 def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    return create_client(url, key, options=ClientOptions(storage=LocalFileStorage()))
+    # We remove LocalFileStorage to prevent server-side session leaking
+    return create_client(url, key)
 
+# 2. Store the client in Session State (Browser Memory)
+if "supabase_client" not in st.session_state:
+    st.session_state.supabase_client = init_supabase()
+
+supabase = st.session_state.supabase_client
+
+# Groq can be cached because it uses a fixed API key for everyone
 @st.cache_resource
 def init_groq():
     key = os.getenv("GROQ_API_KEY")
     if not key: return None
     return Groq(api_key=key)
 
-supabase = init_supabase()
 groq_client = init_groq()
 PAYPAL_EMAIL = os.getenv("PAYPAL_EMAIL")
 
@@ -117,10 +89,12 @@ if not supabase:
 # ==========================================
 if "code" in st.query_params:
     try:
-        supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
+        # Exchange code for session (User specific)
+        session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
         st.query_params.clear()
         st.rerun()
-    except: st.query_params.clear()
+    except: 
+        st.query_params.clear()
 
 # ==========================================
 # ☁️ DATABASE FUNCTIONS
@@ -148,7 +122,6 @@ def get_chats(email):
     try: return supabase.table("chat_sessions").select("*").eq("email", email).order("created_at", desc=True).execute().data
     except: return []
 
-# SELF-HEALING SAVE FUNCTION
 def save_msg(chat_id, role, content, email_fallback=None):
     try:
         supabase.table("chat_messages").insert({"chat_id": chat_id, "role": role, "content": content}).execute()
@@ -207,7 +180,7 @@ if not session:
         tab_login, tab_reg = st.tabs(["LOGIN", "REGISTER"])
         with tab_login:
             try:
-                res = supabase.auth.sign_in_with_oauth({ "provider": "github", "options": { "redirectTo": "http://localhost:8501" } })
+                res = supabase.auth.sign_in_with_oauth({ "provider": "github", "options": { "redirectTo": PRODUCTION_URL } })
                 st.link_button("▶ ACCESS TERMINAL", res.url, type="primary", use_container_width=True)
             except: st.error("Link Failure")
         with tab_reg:
@@ -299,7 +272,7 @@ else:
         st.session_state.chat = None
         st.rerun()
 
-    # MESSAGES
+    # RENDER MESSAGES
     msgs = get_msgs(chat_id)
     for m in msgs:
         with st.chat_message(m['role']):
@@ -312,39 +285,32 @@ else:
             else:
                 st.markdown(content)
             
-            # --- FIX: UNIQUE KEY FOR DOWNLOAD BUTTON ---
             if m['role'] == "assistant":
                 st.download_button(
                     label="⬇ DOWNLOAD",
                     data=content,
                     file_name=f"sentient_log_{m['created_at'][:10]}.md",
                     mime="text/markdown",
-                    key=m['msg_id'] # <--- Unique ID to prevent crash
+                    key=m['msg_id']
                 )
 
-    # --- NEW FEATURE: CORTEX ACCELERATORS ---
-    # Quick buttons to send standard prompts without typing
+    # CORTEX ACCELERATORS
     st.markdown("### CORTEX ACCELERATORS")
     ac1, ac2, ac3, ac4 = st.columns(4)
     auto_prompt = None
-    
     if ac1.button("🔍 DEBUG CODE"): auto_prompt = "Review the previous code for bugs, security vulnerabilities, and logic errors. Suggest fixes."
     if ac2.button("🛡️ SECURITY AUDIT"): auto_prompt = "Perform a security audit on the discussion above. Identify risks."
     if ac3.button("🏗️ ARCHITECTURE"): auto_prompt = "Propose a scalable system architecture for this concept."
     if ac4.button("📝 GENERATE DOCS"): auto_prompt = "Generate professional documentation (README.md) for this."
 
-    # INPUT LOGIC
+    # INPUT
     user_input = st.chat_input("Enter command...")
-    
-    # Handle either Button Click OR Type Input
     final_prompt = auto_prompt if auto_prompt else user_input
 
     if final_prompt:
-        # Render User
         with st.chat_message("user"): st.markdown(final_prompt)
         save_msg(chat_id, "user", final_prompt, email)
         
-        # Render AI
         with st.chat_message("assistant"):
             sys = f"You are {APP_NAME}."
             if user_premium: sys += " You are on Sentient Pro. Use <thinking> tags for reasoning."
@@ -363,9 +329,6 @@ else:
                     resp_box.markdown(full_resp + "█")
                 resp_box.markdown(full_resp)
                 save_msg(chat_id, "assistant", full_resp, email)
-                
-                # Optional: Rerun to update download buttons properly
                 time.sleep(0.1) 
                 st.rerun()
-                
             except Exception as e: st.error(f"Error: {e}")
