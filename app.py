@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 import os
 import json
 import time
-import tempfile
+import re
+import streamlit.components.v1 as components
 from pypdf import PdfReader
 
 # ==========================================
@@ -13,63 +14,34 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
-# 👇 LIVE URL
 PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
 
 # ==========================================
-# 💾 SYSTEM-LEVEL STORAGE (The "Nuclear" Fix)
+# 💾 MEMORY STORAGE (Fixes Login Loop)
 # ==========================================
-# We save the secret keys to the system's /tmp folder.
-# This survives the Streamlit Cloud reboot during login.
-class SystemFileStorage:
-    def __init__(self):
-        # Use the system temp directory which persists longer
-        self.filename = os.path.join(tempfile.gettempdir(), "supabase_auth_lock.json")
-
-    def set_item(self, key, value):
-        try:
-            data = {}
-            if os.path.exists(self.filename):
-                with open(self.filename, 'r') as f:
-                    content = f.read()
-                    if content: data = json.loads(content)
-            data[key] = value
-            with open(self.filename, 'w') as f:
-                json.dump(data, f)
-        except: pass
-
-    def get_item(self, key):
-        if not os.path.exists(self.filename): return None
-        try:
-            with open(self.filename, 'r') as f:
-                data = json.load(f)
-            return data.get(key)
-        except: return None
-
-    def remove_item(self, key):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f: data = json.load(f)
-                if key in data:
-                    del data[key]
-                    with open(self.filename, 'w') as f: json.dump(data, f)
-            except: pass
+class MemoryStorage:
+    def __init__(self): self.storage = {}
+    def set_item(self, key, value): self.storage[key] = value
+    def get_item(self, key): return self.storage.get(key)
+    def remove_item(self, key): 
+        if key in self.storage: del self.storage[key]
 
 # ==========================================
 # 🔑 INIT CLIENTS
 # ==========================================
-# We DO NOT cache the client itself, only the logic to create it.
-def get_supabase():
+def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    # Use SystemFileStorage to fix the redirect loop
-    return create_client(url, key, options=ClientOptions(storage=SystemFileStorage()))
+    return create_client(url, key, options=ClientOptions(storage=MemoryStorage()))
 
-supabase = get_supabase()
+if "supabase_client" not in st.session_state:
+    st.session_state.supabase_client = init_supabase()
+
+supabase = st.session_state.supabase_client
 
 @st.cache_resource
 def init_groq():
@@ -85,36 +57,21 @@ if not supabase:
     st.stop()
 
 # ==========================================
-# 🔄 AUTHENTICATION HANDLER
+# 🔄 AUTH LOGIC (RAW TOKEN FIX)
 # ==========================================
-
-# 1. HANDLE RETURN FROM GITHUB
 if "code" in st.query_params:
     try:
-        # The Verifier should now be found in /tmp
         session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
-        
-        # Save tokens to Session State (Memory)
         st.session_state["access_token"] = session.access_token
         st.session_state["refresh_token"] = session.refresh_token
-        
-        # Clear URL and Rerun
         st.query_params.clear()
         st.rerun()
-    except Exception as e:
-        # If this fails, it usually means the code is stale. 
-        # We clear it to prevent the "Error Loop".
-        st.query_params.clear()
+    except: st.query_params.clear()
 
-# 2. RESTORE SESSION
 if "access_token" in st.session_state:
     try:
-        supabase.auth.set_session(
-            st.session_state["access_token"], 
-            st.session_state["refresh_token"]
-        )
+        supabase.auth.set_session(st.session_state["access_token"], st.session_state["refresh_token"])
     except:
-        # Token expired
         del st.session_state["access_token"]
         st.rerun()
 
@@ -186,14 +143,10 @@ st.markdown("""
 # ==========================================
 # 🚀 APP LOGIC
 # ==========================================
+try: session = supabase.auth.get_session()
+except: session = None
 
-# CHECK SESSION
-try: 
-    session = supabase.auth.get_session()
-except: 
-    session = None
-
-# 1. LANDING PAGE
+# --- LANDING PAGE ---
 if not session:
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
@@ -232,7 +185,7 @@ if not session:
                     except: st.error("Failed")
         st.markdown("</div>", unsafe_allow_html=True)
 
-# 2. LOGGED IN APP
+# --- APP INTERFACE ---
 else:
     user = session.user
     email = user.email
@@ -287,7 +240,6 @@ else:
     if uploaded_file and "last_uploaded" not in st.session_state:
         st.session_state.last_uploaded = uploaded_file.name
         content = process_uploaded_file(uploaded_file)
-        update_chat_title(chat_id, f"Data: {uploaded_file.name}")
         save_msg(chat_id, "user", f"Uploaded: {uploaded_file.name}", email)
         
         with st.spinner("ANALYZING..."):
@@ -314,6 +266,8 @@ else:
     for m in msgs:
         with st.chat_message(m['role']):
             content = m['content']
+            
+            # 1. Reasoning
             if "<thinking>" in content:
                 parts = content.split("</thinking>")
                 with st.status("Analytic Process", state="complete", expanded=False):
@@ -321,25 +275,27 @@ else:
                 st.markdown(parts[1])
             else: st.markdown(content)
             
-            if m['role'] == "assistant":
+            # 2. Holographic Deck
+            if "```html" in content or "```svg" in content:
+                try:
+                    pattern = r"```(html|svg)\n(.*?)```"
+                    match = re.search(pattern, content, re.DOTALL)
+                    if match:
+                        code_snippet = match.group(2)
+                        with st.expander("👁‍🗨 HOLOGRAPHIC PREVIEW", expanded=True):
+                            st.caption("Live Render:")
+                            components.html(code_snippet, height=400, scrolling=True)
+                except: pass
+
+            # 3. Smart Download (Only if code detected)
+            has_code = "```" in content
+            if m['role'] == "assistant" and has_code:
                 st.download_button("⬇ DOWNLOAD", content, f"log_{m['created_at'][:10]}.md", "text/markdown", key=m['msg_id'])
 
-    # CORTEX ACCELERATORS
-    st.markdown("### CORTEX ACCELERATORS")
-    ac1, ac2, ac3, ac4 = st.columns(4)
-    auto_prompt = None
-    if ac1.button("🔍 DEBUG"): auto_prompt = "Find bugs in previous code."
-    if ac2.button("🛡️ AUDIT"): auto_prompt = "Security audit."
-    if ac3.button("🏗️ ARCHITECT"): auto_prompt = "Design system architecture."
-    if ac4.button("📝 DOCS"): auto_prompt = "Write documentation."
-
     # INPUT
-    user_input = st.chat_input("Enter command...")
-    final_prompt = auto_prompt if auto_prompt else user_input
-
-    if final_prompt:
-        with st.chat_message("user"): st.markdown(final_prompt)
-        save_msg(chat_id, "user", final_prompt, email)
+    if prompt := st.chat_input("Enter command..."):
+        with st.chat_message("user"): st.markdown(prompt)
+        save_msg(chat_id, "user", prompt, email)
         
         with st.chat_message("assistant"):
             sys = f"You are {APP_NAME}."
@@ -348,7 +304,7 @@ else:
             
             api_msgs = [{"role": "system", "content": sys}]
             for m in msgs: api_msgs.append({"role": m['role'], "content": m['content']})
-            api_msgs.append({"role": "user", "content": final_prompt})
+            api_msgs.append({"role": "user", "content": prompt})
 
             try:
                 stream = groq_client.chat.completions.create(model=active_model, messages=api_msgs, stream=True)
