@@ -12,91 +12,52 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
-# 👇 LIVE URL
 PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
 
 # ==========================================
-# 💾 TEMP AUTH STORAGE (Fixes Login Error)
+# 💾 SMART STORAGE (Fixes Loop + Security)
 # ==========================================
-# We use a simple JSON file to store the "Verifier" code during the redirect.
-# This file is temporary and cleared often.
 class TempFileStorage:
     def __init__(self, filename="supabase.auth.token"):
         self.filename = filename
 
     def set_item(self, key, value):
+        # We write to a file so the Verifier survives the Reload
         try:
-            with open(self.filename, 'w') as f:
-                f.write(value)
+            with open(self.filename, 'w') as f: f.write(value)
         except: pass
 
     def get_item(self, key):
         if not os.path.exists(self.filename): return None
         try:
-            with open(self.filename, 'r') as f:
-                return f.read()
+            with open(self.filename, 'r') as f: return f.read()
         except: return None
 
     def remove_item(self, key):
         if os.path.exists(self.filename):
-            try:
-                os.remove(self.filename)
+            try: os.remove(self.filename)
             except: pass
-
-# ==========================================
-# 🎨 UI STYLING
-# ==========================================
-st.markdown("""
-<style>
-    .stApp { background-color: #02040a; color: #e0e0e0; }
-    .feature-box {
-        background: #0a0a0f; border: 1px solid #1f1f2e; padding: 20px;
-        border-radius: 12px; text-align: center; height: 100%;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-    }
-    .feature-icon { font-size: 30px; margin-bottom: 10px; display: block; }
-    .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; }
-    .feature-desc { color: #888; font-size: 14px; }
-    div.stButton > button {
-        background-color: #0f1016; color: #00d4ff; border: 1px solid #00d4ff;
-        width: 100%; border-radius: 6px; font-weight: bold; transition: all 0.3s ease;
-    }
-    div.stButton > button:hover {
-        background-color: #00d4ff; color: #000; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
-    }
-    .stSidebar { background-color: #050508; border-right: 1px solid #111; }
-    .upgrade-box { 
-        border: 1px solid #a855f7; 
-        background: linear-gradient(135deg, #2e1065 0%, #000 100%); 
-        padding: 15px; border-radius: 8px; margin-bottom: 20px; 
-    }
-    section[data-testid="stFileUploader"] {
-        background-color: #0a0a0f; border: 1px dashed #333; border-radius: 8px; padding: 10px;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # ==========================================
 # 🔑 INIT CLIENTS
 # ==========================================
-# NOTE: We do NOT use @st.cache_resource for Supabase to prevent user mixing
-# We add ClientOptions with TempFileStorage to fix the "Empty Verifier" bug
+# 1. Initialize Supabase (NO CACHING - Unique per user)
 def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    try:
-        return create_client(url, key, options=ClientOptions(storage=TempFileStorage()))
-    except: return None
+    # We use TempStorage to handle the OAuth Redirect data
+    return create_client(url, key, options=ClientOptions(storage=TempFileStorage()))
 
 if "supabase_client" not in st.session_state:
     st.session_state.supabase_client = init_supabase()
 
 supabase = st.session_state.supabase_client
 
+# 2. Groq (Cached is fine)
 @st.cache_resource
 def init_groq():
     key = os.getenv("GROQ_API_KEY")
@@ -111,28 +72,29 @@ if not supabase:
     st.stop()
 
 # ==========================================
-# 🔄 AUTH CALLBACK HANDLER
+# 🔄 AUTH FLOW (THE LOGIC FIX)
 # ==========================================
+
+# 1. Handle the Return from GitHub
 if "code" in st.query_params:
     try:
-        # Exchange the code using the Verifier stored in TempFileStorage
-        session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
+        # Exchange code for session using the Verifier in TempStorage
+        res = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
         
-        # Save session to browser memory
-        st.session_state.user_session = session
+        # SAVE SESSION TO BROWSER MEMORY
+        st.session_state.user_session = res.session
         
-        # Clean up the URL
+        # SECURITY: Delete the temp file so others don't see it
+        if os.path.exists("supabase.auth.token"):
+            os.remove("supabase.auth.token")
+            
         st.query_params.clear()
-        
-        # Rerun to show the dashboard
         st.rerun()
     except Exception as e:
-        # If error is just "Code already used", ignore it
-        if "pkce" in str(e).lower():
-            st.error(f"Login Timeout: {e}")
+        # Ignore PKCE errors on refresh
         st.query_params.clear()
 
-# PERSIST SESSION
+# 2. If we have a session in memory, force the client to use it
 if "user_session" in st.session_state:
     try:
         supabase.auth.set_session(
@@ -201,8 +163,43 @@ def process_uploaded_file(uploaded_file):
         return f"Error reading file: {e}"
 
 # ==========================================
+# 🎨 UI STYLING
+# ==========================================
+st.markdown("""
+<style>
+    .stApp { background-color: #02040a; color: #e0e0e0; }
+    .feature-box {
+        background: #0a0a0f; border: 1px solid #1f1f2e; padding: 20px;
+        border-radius: 12px; text-align: center; height: 100%;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .feature-icon { font-size: 30px; margin-bottom: 10px; display: block; }
+    .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; }
+    .feature-desc { color: #888; font-size: 14px; }
+    div.stButton > button {
+        background-color: #0f1016; color: #00d4ff; border: 1px solid #00d4ff;
+        width: 100%; border-radius: 6px; font-weight: bold; transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        background-color: #00d4ff; color: #000; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
+    }
+    .stSidebar { background-color: #050508; border-right: 1px solid #111; }
+    .upgrade-box { 
+        border: 1px solid #a855f7; 
+        background: linear-gradient(135deg, #2e1065 0%, #000 100%); 
+        padding: 15px; border-radius: 8px; margin-bottom: 20px; 
+    }
+    section[data-testid="stFileUploader"] {
+        background-color: #0a0a0f; border: 1px dashed #333; border-radius: 8px; padding: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
 # 🚀 APP LOGIC
 # ==========================================
+
+# CHECK SESSION
 try: session = supabase.auth.get_session()
 except: session = None
 
@@ -226,6 +223,7 @@ if not session:
         tab_login, tab_reg = st.tabs(["LOGIN", "REGISTER"])
         with tab_login:
             try:
+                # Use Live URL
                 res = supabase.auth.sign_in_with_oauth({ "provider": "github", "options": { "redirectTo": PRODUCTION_URL } })
                 st.link_button("▶ ACCESS TERMINAL", res.url, type="primary", use_container_width=True)
             except: st.error("Link Failure")
@@ -350,7 +348,7 @@ else:
     if ac3.button("🏗️ ARCHITECTURE"): auto_prompt = "Propose a scalable system architecture for this concept."
     if ac4.button("📝 GENERATE DOCS"): auto_prompt = "Generate professional documentation (README.md) for this."
 
-    # INPUT
+    # INPUT (OPTIMISTIC UI)
     user_input = st.chat_input("Enter command...")
     final_prompt = auto_prompt if auto_prompt else user_input
 
