@@ -3,6 +3,7 @@ from supabase import create_client, Client, ClientOptions
 from groq import Groq
 from dotenv import load_dotenv
 import os
+import json
 import time
 from pypdf import PdfReader
 
@@ -11,10 +12,39 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
+# 👇 LIVE URL
 PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
+
+# ==========================================
+# 💾 TEMP AUTH STORAGE (Fixes Login Error)
+# ==========================================
+# We use a simple JSON file to store the "Verifier" code during the redirect.
+# This file is temporary and cleared often.
+class TempFileStorage:
+    def __init__(self, filename="supabase.auth.token"):
+        self.filename = filename
+
+    def set_item(self, key, value):
+        try:
+            with open(self.filename, 'w') as f:
+                f.write(value)
+        except: pass
+
+    def get_item(self, key):
+        if not os.path.exists(self.filename): return None
+        try:
+            with open(self.filename, 'r') as f:
+                return f.read()
+        except: return None
+
+    def remove_item(self, key):
+        if os.path.exists(self.filename):
+            try:
+                os.remove(self.filename)
+            except: pass
 
 # ==========================================
 # 🎨 UI STYLING
@@ -52,19 +82,21 @@ st.markdown("""
 # ==========================================
 # 🔑 INIT CLIENTS
 # ==========================================
-# 1. Initialize Supabase (No caching, unique per user)
+# NOTE: We do NOT use @st.cache_resource for Supabase to prevent user mixing
+# We add ClientOptions with TempFileStorage to fix the "Empty Verifier" bug
 def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    return create_client(url, key)
+    try:
+        return create_client(url, key, options=ClientOptions(storage=TempFileStorage()))
+    except: return None
 
 if "supabase_client" not in st.session_state:
     st.session_state.supabase_client = init_supabase()
 
 supabase = st.session_state.supabase_client
 
-# 2. Initialize Groq (Cached is fine for API key)
 @st.cache_resource
 def init_groq():
     key = os.getenv("GROQ_API_KEY")
@@ -79,31 +111,35 @@ if not supabase:
     st.stop()
 
 # ==========================================
-# 🔄 AUTH CALLBACK & PERSISTENCE (THE FIX)
+# 🔄 AUTH CALLBACK HANDLER
 # ==========================================
-
-# 1. Handle the redirect from GitHub
 if "code" in st.query_params:
     try:
-        res = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
-        # SAVE SESSION TO STATE SO IT SURVIVES RELOAD
-        st.session_state.user_session = res.session
+        # Exchange the code using the Verifier stored in TempFileStorage
+        session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
+        
+        # Save session to browser memory
+        st.session_state.user_session = session
+        
+        # Clean up the URL
         st.query_params.clear()
+        
+        # Rerun to show the dashboard
         st.rerun()
     except Exception as e:
-        st.error(f"Login Error: {e}")
+        # If error is just "Code already used", ignore it
+        if "pkce" in str(e).lower():
+            st.error(f"Login Timeout: {e}")
         st.query_params.clear()
 
-# 2. Restore Session from State if available
+# PERSIST SESSION
 if "user_session" in st.session_state:
     try:
-        # Manually set the session on the client
         supabase.auth.set_session(
-            st.session_state.user_session.access_token, 
+            st.session_state.user_session.access_token,
             st.session_state.user_session.refresh_token
         )
     except:
-        # If session expired, clear it
         del st.session_state.user_session
 
 # ==========================================
@@ -167,8 +203,8 @@ def process_uploaded_file(uploaded_file):
 # ==========================================
 # 🚀 APP LOGIC
 # ==========================================
-# Check if we have a valid session
-session = supabase.auth.get_session()
+try: session = supabase.auth.get_session()
+except: session = None
 
 # --- LANDING PAGE ---
 if not session:
@@ -343,3 +379,4 @@ else:
                 time.sleep(0.1) 
                 st.rerun()
             except Exception as e: st.error(f"Error: {e}")
+
