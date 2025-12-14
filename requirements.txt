@@ -1,0 +1,5 @@
+streamlit
+supabase
+groq
+python-dotenv
+pypdf
