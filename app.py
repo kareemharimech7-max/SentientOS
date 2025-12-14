@@ -10,21 +10,16 @@ from pypdf import PdfReader
 # 🧿 CONFIGURATION
 # ==========================================
 APP_NAME = "Sentient OS"
-LOGO_FILE = "logo.jpg"
-# 👇 THIS MUST MATCH YOUR STREAMLIT CLOUD URL EXACTLY
-# Example: https://sentient-os.streamlit.app
-# If you are on localhost, use http://localhost:8501
+LOGO_FILE = "logo.jpg" 
+# 👇 ENSURE THIS IS EXACT
 PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
 
 # ==========================================
-# 💾 MEMORY-ONLY STORAGE (Fixes File Wipe Bug)
+# 💾 MEMORY STORAGE (Required for Client)
 # ==========================================
-# Instead of writing to a file (which gets deleted), we try to trick the 
-# library into using memory, or we rely on the URL code exchange purely.
-# This specific class is a dummy storage that prevents the "File Not Found" crash.
 class MemoryStorage:
     def __init__(self): self.storage = {}
     def set_item(self, key, value): self.storage[key] = value
@@ -35,18 +30,14 @@ class MemoryStorage:
 # ==========================================
 # 🔑 INIT CLIENTS
 # ==========================================
-# We create a new client every run, but we will manually inject the session later.
 def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    # We use MemoryStorage to prevent file system errors on Cloud
     return create_client(url, key, options=ClientOptions(storage=MemoryStorage()))
 
-if "supabase_client" not in st.session_state:
-    st.session_state.supabase_client = init_supabase()
-
-supabase = st.session_state.supabase_client
+# Create a fresh client every time (Security best practice)
+supabase = init_supabase()
 
 @st.cache_resource
 def init_groq():
@@ -57,41 +48,40 @@ def init_groq():
 groq_client = init_groq()
 PAYPAL_EMAIL = os.getenv("PAYPAL_EMAIL")
 
-if not supabase:
-    st.error("❌ Critical: Missing Supabase Keys")
-    st.stop()
-
 # ==========================================
-# 🔄 AUTHENTICATION ENGINE (The Fix)
+# 🔄 AUTH LOGIC (RAW TOKEN FIX)
 # ==========================================
 
-# 1. CHECK FOR REDIRECT CODE (GitHub Return)
+# 1. Handle Return from GitHub/Email
 if "code" in st.query_params:
-    code = st.query_params["code"]
     try:
-        # Exchange code for session
-        res = supabase.auth.exchange_code_for_session({"auth_code": code})
-        # SAVE SESSION TO BROWSER MEMORY
-        st.session_state.auth_session = res.session
-        st.query_params.clear() # Clean URL
-        st.rerun() # Refresh to show logged in state
-    except Exception as e:
-        # If this fails, it usually means the code expired or the verifier was lost.
-        # We catch it silently to prevent a crash, but we can't log them in.
+        # Exchange Code
+        session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
+        
+        # Save ONLY the strings (More durable than objects)
+        st.session_state["access_token"] = session.access_token
+        st.session_state["refresh_token"] = session.refresh_token
+        
+        # Clear URL and Reload
         st.query_params.clear()
-        # st.error(f"Handshake Failed: {e}") # Debug only
+        st.rerun()
+    except Exception as e:
+        st.error(f"Login Error: {e}")
+        st.query_params.clear()
 
-# 2. CHECK IF WE ARE LOGGED IN
-session = None
-if "auth_session" in st.session_state:
-    session = st.session_state.auth_session
-    # Force the client to use this session
+# 2. Restore Session from Saved Tokens
+if "access_token" in st.session_state:
     try:
-        supabase.auth.set_session(session.access_token, session.refresh_token)
+        # Force the client to use the saved token
+        supabase.auth.set_session(
+            st.session_state["access_token"], 
+            st.session_state["refresh_token"]
+        )
     except:
-        # Session expired
-        session = None
-        del st.session_state.auth_session
+        # If token invalid, clear it
+        del st.session_state["access_token"]
+        del st.session_state["refresh_token"]
+        st.rerun()
 
 # ==========================================
 # ☁️ DATABASE FUNCTIONS
@@ -108,12 +98,9 @@ def is_premium(email):
         return res.data.get("is_premium", False)
     except: return False
 
-def create_chat(email, title="New Sequence"):
-    res = supabase.table("chat_sessions").insert({"email": email, "title": title}).execute()
+def create_chat(email):
+    res = supabase.table("chat_sessions").insert({"email": email, "title": "New Sequence"}).execute()
     return res.data[0]['chat_id'] if res.data else None
-
-def update_chat_title(chat_id, new_title):
-    supabase.table("chat_sessions").update({"title": new_title}).eq("chat_id", chat_id).execute()
 
 def get_chats(email):
     try: return supabase.table("chat_sessions").select("*").eq("email", email).order("created_at", desc=True).execute().data
@@ -150,33 +137,28 @@ def process_uploaded_file(uploaded_file):
 st.markdown("""
 <style>
     .stApp { background-color: #02040a; color: #e0e0e0; }
-    .feature-box {
-        background: #0a0a0f; border: 1px solid #1f1f2e; padding: 20px;
-        border-radius: 12px; text-align: center; height: 100%;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-    }
-    .feature-icon { font-size: 30px; margin-bottom: 10px; display: block; }
-    .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; text-transform: uppercase; }
+    .auth-card { background: #0a0a0f; border: 1px solid #333; border-radius: 12px; padding: 30px; text-align: center; }
+    .feature-box { background: #0f1016; border: 1px solid #1f1f2e; padding: 20px; border-radius: 12px; text-align: center; height: 100%; }
+    .feature-title { font-weight: bold; color: #00d4ff; margin-bottom: 5px; font-size: 16px; }
     .feature-desc { color: #888; font-size: 14px; }
-    div.stButton > button {
-        background-color: #0f1016; color: #00d4ff; border: 1px solid #00d4ff;
-        width: 100%; border-radius: 6px; font-weight: bold; transition: all 0.3s ease;
-    }
-    div.stButton > button:hover {
-        background-color: #00d4ff; color: #000; box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
-    }
-    .stSidebar { background-color: #050508; border-right: 1px solid #111; }
-    .auth-card {
-        background: #0a0a0f; border: 1px solid #333; border-radius: 12px; padding: 30px; text-align: center;
-    }
+    div.stButton > button { background-color: #1a1a1a; color: white; border: 1px solid #333; width: 100%; border-radius: 6px; }
+    div.stButton > button:hover { border-color: #00d4ff; color: #00d4ff; }
+    .stSidebar { background-color: #000; border-right: 1px solid #111; }
+    .upgrade-box { border: 1px solid #a855f7; background: linear-gradient(135deg, #2e1065 0%, #000 100%); padding: 15px; border-radius: 8px; margin-bottom: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📱 APP VIEWS
+# 🚀 APP LOGIC
 # ==========================================
 
-# 1. LANDING PAGE (LOGGED OUT)
+# CHECK SESSION
+try: 
+    session = supabase.auth.get_session()
+except: 
+    session = None
+
+# 1. LANDING PAGE
 if not session:
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
@@ -185,72 +167,61 @@ if not session:
     
     st.markdown("<br>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
-    with c1: st.markdown("<div class='feature-box'><span class='feature-icon'>⚡</span><div class='feature-title'>LPU™ VELOCITY</div><div class='feature-desc'>Real-time inference speeds.</div></div>", unsafe_allow_html=True)
-    with c2: st.markdown("<div class='feature-box'><span class='feature-icon'>🧠</span><div class='feature-title'>DEEP REASONING</div><div class='feature-desc'>Chain-of-thought logic processing.</div></div>", unsafe_allow_html=True)
-    with c3: st.markdown("<div class='feature-box'><span class='feature-icon'>🔐</span><div class='feature-title'>SECURE CLOUD</div><div class='feature-desc'>Encrypted memory vaults.</div></div>", unsafe_allow_html=True)
+    with c1: st.markdown("<div class='feature-box'><span style='font-size:30px'>⚡</span><div class='feature-title'>VELOCITY</div><div class='feature-desc'>Real-time inference.</div></div>", unsafe_allow_html=True)
+    with c2: st.markdown("<div class='feature-box'><span style='font-size:30px'>🧠</span><div class='feature-title'>REASONING</div><div class='feature-desc'>Chain-of-thought logic.</div></div>", unsafe_allow_html=True)
+    with c3: st.markdown("<div class='feature-box'><span style='font-size:30px'>🔐</span><div class='feature-title'>SECURE</div><div class='feature-desc'>Encrypted memory.</div></div>", unsafe_allow_html=True)
 
     st.markdown("<br><br>", unsafe_allow_html=True)
-
     _, center_col, _ = st.columns([1, 1.2, 1])
     with center_col:
         st.markdown("<div class='auth-card'>", unsafe_allow_html=True)
         st.subheader("INITIALIZE LINK")
         
-        tab_login, tab_email = st.tabs(["GITHUB", "EMAIL"])
-        
-        with tab_login:
+        tab_gh, tab_email = st.tabs(["GITHUB", "EMAIL"])
+        with tab_gh:
             st.write("")
-            try:
-                # IMPORTANT: redirectTo must match your URL EXACTLY
-                res = supabase.auth.sign_in_with_oauth({ 
-                    "provider": "github", 
-                    "options": { "redirectTo": PRODUCTION_URL } 
-                })
-                st.link_button("▶ ACCESS VIA GITHUB", res.url, type="primary", use_container_width=True)
-            except Exception as e: st.error(f"GitHub Error: {e}")
-
+            if st.button("▶ ACCESS VIA GITHUB", type="primary", use_container_width=True):
+                try:
+                    res = supabase.auth.sign_in_with_oauth({ "provider": "github", "options": { "redirectTo": PRODUCTION_URL } })
+                    st.link_button("CLICK TO CONNECT", res.url, type="primary", use_container_width=True)
+                except: st.error("Link Error")
+        
         with tab_email:
             st.write("")
             email_input = st.text_input("Operator Email")
             if st.button("▶ SEND MAGIC LINK", use_container_width=True):
                 if email_input:
                     try:
-                        supabase.auth.sign_in_with_otp({
-                            "email": email_input,
-                            "options": {"email_redirect_to": PRODUCTION_URL}
-                        })
-                        st.success("CHECK YOUR INBOX")
-                    except Exception as e: st.error(f"Error: {e}")
+                        supabase.auth.sign_in_with_otp({"email": email_input, "options": {"email_redirect_to": PRODUCTION_URL}})
+                        st.success("CHECK INBOX")
+                    except: st.error("Failed")
         st.markdown("</div>", unsafe_allow_html=True)
 
-# 2. DASHBOARD (LOGGED IN)
+# 2. LOGGED IN APP
 else:
     user = session.user
     email = user.email
     sync_user(email)
     user_premium = is_premium(email)
 
-    NAME_FREE, NAME_PRO = "SENTIENT CORE", "SENTIENT PRO"
     active_model = "llama-3.3-70b-versatile" if user_premium else "llama-3.1-8b-instant"
-    display_name = NAME_PRO if user_premium else NAME_FREE
+    display_name = "SENTIENT PRO" if user_premium else "SENTIENT CORE"
 
-    # SIDEBAR
     with st.sidebar:
         if os.path.exists(LOGO_FILE): st.image(LOGO_FILE, use_container_width=True)
         st.caption(f"OPERATOR: {email}")
+        if user_premium: st.markdown(f"<span style='color:#a855f7'>● {display_name}</span>", unsafe_allow_html=True)
+        else: st.markdown(f"<span style='color:#00d4ff'>● {display_name}</span>", unsafe_allow_html=True)
         
-        if user_premium: st.markdown(f"<span style='color:#a855f7'>● {NAME_PRO}</span>", unsafe_allow_html=True)
-        else: st.markdown(f"<span style='color:#00d4ff'>● {NAME_FREE}</span>", unsafe_allow_html=True)
         st.divider()
-
         st.markdown("### NEURAL INGESTION")
-        uploaded_file = st.file_uploader("Upload Data", type=['txt', 'py', 'js', 'pdf', 'md', 'csv'], label_visibility="collapsed")
+        uploaded_file = st.file_uploader("Upload Data", type=['txt', 'py', 'js', 'pdf'], label_visibility="collapsed")
         
         st.divider()
         if st.button("➕ New Sequence", use_container_width=True):
             st.session_state.chat = create_chat(email)
             st.rerun()
-            
+        
         st.subheader("MEMORY")
         chats = get_chats(email)
         for c in chats:
@@ -260,14 +231,15 @@ else:
         
         st.divider()
         if not user_premium:
-            st.markdown(f"<div style='background:#111; border:1px solid #333; padding:15px; border-radius:8px; margin-bottom:10px;'><strong style='color:#fff'>UPGRADE</strong><br><span style='font-size:12px; color:#888'>Unlock 70B Reasoning</span></div>", unsafe_allow_html=True)
-            st.link_button("PURCHASE LICENSE ($10)", f"https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business={PAYPAL_EMAIL}&item_name=SentientPro&amount=10.00", use_container_width=True)
+            st.markdown(f"<div class='upgrade-box'><b>UPGRADE SYSTEM</b><br><span style='font-size:12px; color:#e9d5ff'>Unlock 70B Model</span></div>", unsafe_allow_html=True)
+            st.link_button("PURCHASE ($10)", f"https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business={PAYPAL_EMAIL}&item_name=SentientPro&amount=10.00", use_container_width=True)
+        
         if st.button("TERMINATE LINK"):
             supabase.auth.sign_out()
-            if "auth_session" in st.session_state: del st.session_state.auth_session
+            if "access_token" in st.session_state: del st.session_state["access_token"]
             st.rerun()
 
-    # CHAT LOGIC
+    # CHAT
     if "chat" not in st.session_state or not st.session_state.chat:
         if chats: st.session_state.chat = chats[0]['chat_id']
         else: 
@@ -276,27 +248,23 @@ else:
             st.rerun()
     chat_id = st.session_state.chat
 
-    # FILE UPLOAD
+    # FILE HANDLING
     if uploaded_file and "last_uploaded" not in st.session_state:
         st.session_state.last_uploaded = uploaded_file.name
-        file_content = process_uploaded_file(uploaded_file)
-        new_title = f"Data: {uploaded_file.name}"
-        update_chat_title(chat_id, new_title)
+        content = process_uploaded_file(uploaded_file)
+        update_chat_title(chat_id, f"Data: {uploaded_file.name}")
         save_msg(chat_id, "user", f"Uploaded: {uploaded_file.name}", email)
         
-        sys = f"You are {APP_NAME}."
-        prompt = f"Analyze this file:\n{file_content}"
-        
         with st.spinner("ANALYZING..."):
-            api_msgs = [{"role": "system", "content": sys}, {"role": "user", "content": prompt}]
+            sys = f"You are {APP_NAME}."
+            api_msgs = [{"role": "system", "content": sys}, {"role": "user", "content": f"Analyze this file:\n{content}"}]
             try:
                 resp = groq_client.chat.completions.create(model=active_model, messages=api_msgs)
                 save_msg(chat_id, "assistant", resp.choices[0].message.content, email)
                 st.rerun()
-            except Exception as e: st.error(f"Failed: {e}")
+            except: pass
             
-    if not uploaded_file and "last_uploaded" in st.session_state:
-        del st.session_state.last_uploaded
+    if not uploaded_file and "last_uploaded" in st.session_state: del st.session_state.last_uploaded
 
     # HEADER
     c1, c2 = st.columns([6,1])
@@ -316,8 +284,7 @@ else:
                 with st.status("Analytic Process", state="complete", expanded=False):
                     st.code(parts[0].replace("<thinking>", "").strip(), language="text")
                 st.markdown(parts[1])
-            else:
-                st.markdown(content)
+            else: st.markdown(content)
             
             if m['role'] == "assistant":
                 st.download_button("⬇ DOWNLOAD", content, f"log_{m['created_at'][:10]}.md", "text/markdown", key=m['msg_id'])
@@ -326,9 +293,9 @@ else:
     st.markdown("### CORTEX ACCELERATORS")
     ac1, ac2, ac3, ac4 = st.columns(4)
     auto_prompt = None
-    if ac1.button("🔍 DEBUG"): auto_prompt = "Find bugs in the code above."
-    if ac2.button("🛡️ AUDIT"): auto_prompt = "Perform security audit."
-    if ac3.button("🏗️ ARCHITECTURE"): auto_prompt = "Design system architecture."
+    if ac1.button("🔍 DEBUG"): auto_prompt = "Find bugs in previous code."
+    if ac2.button("🛡️ AUDIT"): auto_prompt = "Security audit."
+    if ac3.button("🏗️ ARCHITECT"): auto_prompt = "Design system architecture."
     if ac4.button("📝 DOCS"): auto_prompt = "Write documentation."
 
     # INPUT
