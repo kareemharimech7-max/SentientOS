@@ -3,7 +3,6 @@ from supabase import create_client, Client, ClientOptions
 from groq import Groq
 from dotenv import load_dotenv
 import os
-import json
 import time
 from pypdf import PdfReader
 
@@ -12,7 +11,6 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
-# 👇 ENSURE THIS MATCHES YOUR LIVE URL EXACTLY
 PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
@@ -52,25 +50,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔑 INIT CLIENTS (SECURE FIX)
+# 🔑 INIT CLIENTS
 # ==========================================
-
-# 1. REMOVE @st.cache_resource FROM SUPABASE
-# Every user needs their OWN instance, otherwise they share your login!
+# 1. Initialize Supabase (No caching, unique per user)
 def init_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    # We remove LocalFileStorage to prevent server-side session leaking
     return create_client(url, key)
 
-# 2. Store the client in Session State (Browser Memory)
 if "supabase_client" not in st.session_state:
     st.session_state.supabase_client = init_supabase()
 
 supabase = st.session_state.supabase_client
 
-# Groq can be cached because it uses a fixed API key for everyone
+# 2. Initialize Groq (Cached is fine for API key)
 @st.cache_resource
 def init_groq():
     key = os.getenv("GROQ_API_KEY")
@@ -85,16 +79,32 @@ if not supabase:
     st.stop()
 
 # ==========================================
-# 🔄 AUTH CALLBACK
+# 🔄 AUTH CALLBACK & PERSISTENCE (THE FIX)
 # ==========================================
+
+# 1. Handle the redirect from GitHub
 if "code" in st.query_params:
     try:
-        # Exchange code for session (User specific)
-        session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
+        res = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
+        # SAVE SESSION TO STATE SO IT SURVIVES RELOAD
+        st.session_state.user_session = res.session
         st.query_params.clear()
         st.rerun()
-    except: 
+    except Exception as e:
+        st.error(f"Login Error: {e}")
         st.query_params.clear()
+
+# 2. Restore Session from State if available
+if "user_session" in st.session_state:
+    try:
+        # Manually set the session on the client
+        supabase.auth.set_session(
+            st.session_state.user_session.access_token, 
+            st.session_state.user_session.refresh_token
+        )
+    except:
+        # If session expired, clear it
+        del st.session_state.user_session
 
 # ==========================================
 # ☁️ DATABASE FUNCTIONS
@@ -157,8 +167,8 @@ def process_uploaded_file(uploaded_file):
 # ==========================================
 # 🚀 APP LOGIC
 # ==========================================
-try: session = supabase.auth.get_session()
-except: session = None
+# Check if we have a valid session
+session = supabase.auth.get_session()
 
 # --- LANDING PAGE ---
 if not session:
@@ -229,6 +239,7 @@ else:
             st.link_button("PURCHASE LICENSE ($10)", f"https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business={PAYPAL_EMAIL}&item_name=SentientPro&amount=10.00", use_container_width=True)
         if st.button("TERMINATE LINK"):
             supabase.auth.sign_out()
+            if "user_session" in st.session_state: del st.session_state.user_session
             st.rerun()
 
     # CHAT ID LOGIC
