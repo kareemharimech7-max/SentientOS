@@ -3,7 +3,9 @@ from supabase import create_client, Client, ClientOptions
 from groq import Groq
 from dotenv import load_dotenv
 import os
+import json
 import time
+import tempfile
 from pypdf import PdfReader
 
 # ==========================================
@@ -11,33 +13,63 @@ from pypdf import PdfReader
 # ==========================================
 APP_NAME = "Sentient OS"
 LOGO_FILE = "logo.jpg" 
-# 👇 ENSURE THIS IS EXACT
+# 👇 LIVE URL
 PRODUCTION_URL = "https://sentientos.streamlit.app" 
 
 st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="wide")
 load_dotenv()
 
 # ==========================================
-# 💾 MEMORY STORAGE (Required for Client)
+# 💾 SYSTEM-LEVEL STORAGE (The "Nuclear" Fix)
 # ==========================================
-class MemoryStorage:
-    def __init__(self): self.storage = {}
-    def set_item(self, key, value): self.storage[key] = value
-    def get_item(self, key): return self.storage.get(key)
-    def remove_item(self, key): 
-        if key in self.storage: del self.storage[key]
+# We save the secret keys to the system's /tmp folder.
+# This survives the Streamlit Cloud reboot during login.
+class SystemFileStorage:
+    def __init__(self):
+        # Use the system temp directory which persists longer
+        self.filename = os.path.join(tempfile.gettempdir(), "supabase_auth_lock.json")
+
+    def set_item(self, key, value):
+        try:
+            data = {}
+            if os.path.exists(self.filename):
+                with open(self.filename, 'r') as f:
+                    content = f.read()
+                    if content: data = json.loads(content)
+            data[key] = value
+            with open(self.filename, 'w') as f:
+                json.dump(data, f)
+        except: pass
+
+    def get_item(self, key):
+        if not os.path.exists(self.filename): return None
+        try:
+            with open(self.filename, 'r') as f:
+                data = json.load(f)
+            return data.get(key)
+        except: return None
+
+    def remove_item(self, key):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f: data = json.load(f)
+                if key in data:
+                    del data[key]
+                    with open(self.filename, 'w') as f: json.dump(data, f)
+            except: pass
 
 # ==========================================
 # 🔑 INIT CLIENTS
 # ==========================================
-def init_supabase():
+# We DO NOT cache the client itself, only the logic to create it.
+def get_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     if not url or not key: return None
-    return create_client(url, key, options=ClientOptions(storage=MemoryStorage()))
+    # Use SystemFileStorage to fix the redirect loop
+    return create_client(url, key, options=ClientOptions(storage=SystemFileStorage()))
 
-# Create a fresh client every time (Security best practice)
-supabase = init_supabase()
+supabase = get_supabase()
 
 @st.cache_resource
 def init_groq():
@@ -48,39 +80,42 @@ def init_groq():
 groq_client = init_groq()
 PAYPAL_EMAIL = os.getenv("PAYPAL_EMAIL")
 
+if not supabase:
+    st.error("❌ Critical: Missing Supabase Keys")
+    st.stop()
+
 # ==========================================
-# 🔄 AUTH LOGIC (RAW TOKEN FIX)
+# 🔄 AUTHENTICATION HANDLER
 # ==========================================
 
-# 1. Handle Return from GitHub/Email
+# 1. HANDLE RETURN FROM GITHUB
 if "code" in st.query_params:
     try:
-        # Exchange Code
+        # The Verifier should now be found in /tmp
         session = supabase.auth.exchange_code_for_session({"auth_code": st.query_params["code"]})
         
-        # Save ONLY the strings (More durable than objects)
+        # Save tokens to Session State (Memory)
         st.session_state["access_token"] = session.access_token
         st.session_state["refresh_token"] = session.refresh_token
         
-        # Clear URL and Reload
+        # Clear URL and Rerun
         st.query_params.clear()
         st.rerun()
     except Exception as e:
-        st.error(f"Login Error: {e}")
+        # If this fails, it usually means the code is stale. 
+        # We clear it to prevent the "Error Loop".
         st.query_params.clear()
 
-# 2. Restore Session from Saved Tokens
+# 2. RESTORE SESSION
 if "access_token" in st.session_state:
     try:
-        # Force the client to use the saved token
         supabase.auth.set_session(
             st.session_state["access_token"], 
             st.session_state["refresh_token"]
         )
     except:
-        # If token invalid, clear it
+        # Token expired
         del st.session_state["access_token"]
-        del st.session_state["refresh_token"]
         st.rerun()
 
 # ==========================================
